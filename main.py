@@ -7,7 +7,11 @@ from typing import Dict, List
 import requests
 from kafka import KafkaConsumer, KafkaProducer
 from requests.auth import HTTPBasicAuth
-# import shared
+import requests_cache
+
+# requests_cache.install_cache('demo_cache')
+
+import shared
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
 
@@ -35,7 +39,7 @@ def start_kafka() -> None:
         try:
             logging.info("Received message: " + str(msg.value))
             json_value = msg.value
-            shared.mark_job_as_running(json_value.get("jobId"))
+            p.mark_job_as_running(json_value.get("jobId"))
             specimen_data = json_value.get("object")
             result = run_api_call(specimen_data)
             mas_job_record = map_to_annotation_event(
@@ -113,55 +117,80 @@ def publish_annotation_event(annotation_event: Dict, producer: KafkaProducer) ->
     producer.send(os.environ.get("KAFKA_PRODUCER_TOPIC"), annotation_event)
 
 
-def run_api_call(digital_specimen: Dict) -> List[Dict[str, str]]:
-    """
-    Calls BOLD EU API based on the available identifiers.
-    It is possible that one Digital Specimen has multiple BOLD records.
-    :param specimen_data: The JSON data of the Digital Specimen
-    :return:  A list of results that contain the queryString and the BOLD EU process ids
-    """
-
-    print(digital_specimen)
+def run_api_call(digital_media: Dict) -> List[Dict[str, str]]:
 
     data = {
         "jobId": "20.5000.1025/AAA-111-BBB",
         "object": {
-            "digitalSpecimen": digital_specimen
+            "digitalSpecimen": {
+                "@id": "https://doi.org/10.3535/XYZ-XYZ-XYZ",
+                "dwc:scientificName": "Example species",
+                "dwc:taxonID": "123456",
+                "media": [
+                    digital_media
+                ]
+            }
         },
         "batchingRequested": False
-    }    
+    }  
 
-    # Send the POST request to the server
-    response = requests.post(TAXAMORPH_ENDPOINT, json=data)
-    print(response)
-    # result = response.json()
-    # print("Response from server:")
-    # print(result)
+    # ------------------------------
+    # Send request to inference API
+    # ------------------------------
+    
+    try:
+        response = requests.post(TAXAMORPH_ENDPOINT, json=data)
+        response.raise_for_status()
+        result = response.json()
+    except requests.RequestException as e:
+        print(f"Request failed: {e}")
+        exit(1)
+    
+    # ------------------------------
+    # Process response
+    # ------------------------------
+    
+    print("Response from server:")
+    print(result)
+    
+    # Extract the download URL
+    annotations = result.get("annotations", [])
+    if annotations:
+        download_url = annotations[0].get("oa:hasBody", {}).get("oa:value")
+        if download_url:
+            print(f"Download your image here:\n{download_url}")
+        else:
+            print("No download URL found in the response.")
+    else:
+        print("No annotations found in the response.")
 
 
-def run_local(specimen_id: str) -> None:
+def run_local(media_id: str) -> None:
     """
     Runs script locally. Demonstrates using a specimen target
     :param specimen_id: A specimen ID from DiSSCo Sandbox Environment https://sandbox.dissco.tech/search
     Example: SANDBOX/KMP-FZ6-S2K
     :return: Return nothing but will log the result
     """
-    digital_specimen = (
+    digital_media = (
         requests.get(
-            f"https://sandbox.dissco.tech/api/digital-specimen/v1/{specimen_id}"
+            f"https://sandbox.dissco.tech/api/digital-media/v1/{media_id}"
         )
         .json()
         .get("data")
         .get("attributes")
     )
 
-    print(digital_specimen)
+    taxamorph_annotations = run_api_call(digital_media)
 
-    result = run_api_call(digital_specimen)
+    annotations = map_result_to_annotation(
+        digital_media, taxamorph_annotations
+    )
+    # event = map_to_annotation_event(annotations, str(uuid.uuid4()))    
     # mas_job_record = map_to_annotation_event(specimen_data, result, str(uuid4()))
     # logging.info("Created annotations: " + json.dumps(mas_job_record, indent=2))
 
 
 if __name__ == "__main__":
-    run_local('SANDBOX/241-QN4-94Y')
+    run_local('SANDBOX/4LB-38S-KSM')
     # run_local("https://dev.dissco.tech/api/digital-specimen/v1/TEST/MJG-GTC-5C2")
